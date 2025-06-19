@@ -11,7 +11,8 @@ pub const Regex = struct {
     threads: []Thread,
 
     pub fn compile(allocator: std.mem.Allocator, regex: []const u8) !Regex {
-        const len, const depth = try countAndValidate(regex);
+        var tokenizer: Tokenizer = .{ .input = regex };
+        const len, const depth = try countAndValidate(&tokenizer);
 
         const threads = try allocator.alloc(Thread, len * 2);
         errdefer allocator.free(threads);
@@ -25,24 +26,22 @@ pub const Regex = struct {
         var prev_atom: i32 = 0;
         var hole_other_branch: i32 = -1;
 
-        for (regex) |ch| {
+        while (tokenizer.next()) |tok| {
             const end: i32 = @intCast(code.len);
 
-            switch (ch) {
-                '^' => code.push(.begin),
-                '$' => code.push(.begin),
-                '(' => stack.push(.{ prev_atom, hole_other_branch }),
-                ')' => {
-                    if (hole_other_branch > 0) {
-                        code.buf[@intCast(hole_other_branch)] = encode(end - hole_other_branch); // relative to the jmp itself
-                    }
-
-                    const x = stack.pop().?;
-                    prev_atom = x[0];
-                    hole_other_branch = x[1];
+            switch (tok) {
+                .char => |ch| {
+                    prev_atom = end;
+                    code.push(.char);
+                    code.push(encode(ch));
                 },
 
-                '?' => {
+                .dot => {
+                    code.push(.any);
+                    prev_atom = end;
+                },
+
+                .que => {
                     code.insertSlice(@intCast(prev_atom), &.{
                         .split,
                         encode(2), // run the check
@@ -50,13 +49,13 @@ pub const Regex = struct {
                     });
                 },
 
-                '+' => {
+                .plus => {
                     code.push(.split);
                     code.push(encode(prev_atom - end - 1)); // repeat
                     code.push(encode(1)); // jump out otherwise
                 },
 
-                '*' => {
+                .star => {
                     code.insertSlice(@intCast(prev_atom), &.{
                         .split,
                         encode(2), // run the check
@@ -67,12 +66,12 @@ pub const Regex = struct {
                     code.push(encode(prev_atom - end - 4)); // keep repeating
                 },
 
-                '|' => {
+                .pipe => {
                     // TODO: groups? can we just put it in the stack?
-                    code.insertSlice(@intCast(hole_other_branch + 1), &.{
+                    code.insertSlice(@intCast(prev_atom), &.{
                         .split,
                         encode(2), // LHS branch (which ends with holey-jmp)
-                        encode(end - hole_other_branch + 2), // RHS
+                        encode(end - prev_atom + 3), // RHS
                     });
 
                     // Point any previous hole to our newly created holey-jmp (double-jump)
@@ -87,16 +86,24 @@ pub const Regex = struct {
                     code.push(encode(if (comptime builtin.is_test) 0x7FFFFFFF else 1)); // so it blows if we don't fill it
                 },
 
-                '.' => {
-                    code.push(.any);
+                .lparen => {
+                    stack.push(.{ end, hole_other_branch });
                     prev_atom = end;
+                    hole_other_branch = -1;
                 },
 
-                else => {
-                    prev_atom = end;
-                    code.push(.char);
-                    code.push(encode(ch));
+                .rparen => {
+                    if (hole_other_branch > 0) {
+                        code.buf[@intCast(hole_other_branch)] = encode(end - hole_other_branch); // relative to the jmp itself
+                    }
+
+                    const x = stack.pop().?;
+                    prev_atom = x[0];
+                    hole_other_branch = x[1];
                 },
+
+                .caret => code.push(.begin),
+                .dollar => code.push(.end),
             }
         }
 
@@ -124,21 +131,87 @@ pub const Regex = struct {
         return pikevm(self.code, text, self.threads);
     }
 
-    // TODO: validate
-    fn countAndValidate(regex: []const u8) ![2]usize {
-        var len: usize = 1;
-        var depth: usize = 0;
+    fn countAndValidate(tokenizer: *Tokenizer) ![2]usize {
+        var len: usize = 1; // we always append match
+        var depth: usize = 0; // current grouping level
+        var max_depth: usize = 0; // stack size we need for compilation
+        var can_repeat: bool = false; // repeating & empty groups
 
-        for (regex) |ch| switch (ch) {
-            '(' => depth += 1,
-            ')' => {},
-            '^', '$', '.' => len += 1,
-            '?', '+' => len += 3,
-            '*', '|' => len += 5,
-            else => len += 2,
-        };
+        while (tokenizer.next()) |tok| {
+            if (!can_repeat) switch (tok) {
+                .que, .plus, .star => return error.NothingToRepeat,
+                else => {},
+            };
 
-        return .{ len, depth };
+            switch (tok) {
+                .lparen => {
+                    depth += 1;
+                    max_depth = @max(depth, max_depth);
+                },
+                .rparen => {
+                    if (depth == 0) return error.NothingToClose;
+                    if (!can_repeat) return error.EmptyGroup;
+                    depth -= 1;
+                },
+                .dot, .dollar, .caret => len += 1,
+                .char => len += 2,
+                .que, .plus => len += 3,
+                .star, .pipe => len += 5,
+            }
+
+            can_repeat = switch (tok) {
+                .char, .dot, .rparen => true,
+                else => false,
+            };
+        }
+
+        if (depth > 0) {
+            return error.UnclosedGroup;
+        }
+
+        tokenizer.pos = 0; // reset back
+        return .{ len, max_depth };
+    }
+};
+
+const Token = union(enum) {
+    char: u8,
+    dot,
+    que,
+    plus,
+    star,
+    pipe,
+    lparen,
+    rparen,
+    dollar,
+    caret,
+};
+
+const Tokenizer = struct {
+    input: []const u8,
+    pos: usize = 0,
+
+    fn next(self: *Tokenizer) ?Token {
+        // TODO: escaping (\\ -> char, \+ -> char, but \w -> alphanum)
+        while (self.pos < self.input.len) {
+            const ch = self.input[self.pos];
+            self.pos += 1;
+
+            return switch (ch) {
+                '.' => .dot,
+                '?' => .que,
+                '+' => .plus,
+                '*' => .star,
+                '|' => .pipe,
+                '(' => .lparen,
+                ')' => .rparen,
+                '^' => .caret,
+                '$' => .dollar,
+                else => .{ .char = ch },
+            };
+        }
+
+        return null;
     }
 };
 
@@ -181,7 +254,9 @@ fn decodeJmp(code: []const Op, pc: usize) usize {
     return @intCast(@as(isize, @intCast(pc)) + decode(code, pc));
 }
 
-// TODO: https://swtch.com/~rsc/regexp/regexp2.html#pike
+// https://dl.acm.org/doi/10.1145/363347.363387
+// https://swtch.com/~rsc/regexp/regexp2.html#pike
+// TODO: captures
 fn pikevm(code: []const Op, text: []const u8, threads: []Thread) bool {
     var clist = Buf(Thread).init(threads[0 .. threads.len / 2]);
     var nlist = Buf(Thread).init(threads[threads.len / 2 ..]);
@@ -191,16 +266,16 @@ fn pikevm(code: []const Op, text: []const u8, threads: []Thread) bool {
 
     var sp: usize = 0;
     while (true) : (sp += 1) {
-        std.debug.print("sp={}\n", .{sp});
+        // std.debug.print("sp={}\n", .{sp});
 
-        // TODO: I think it could still overflow but maybe we could just compute real max size for clist/nlist in count()?
+        // TODO: I think it can still overflow but maybe we could just compute real max size for clist/nlist in count()?
         var j: usize = 0; // ^/jmp/split needs to be processed before advancing
         while (j < clist.len) : (j += 1) { // and we do that by pushing to clist
             const pc = clist.buf[j].pc;
 
             switch (code[pc]) {
                 .begin => if (sp == 0) clist.push(.{ .pc = pc + 1 }),
-                .end => return false, // TODO (the other version does not work yet either)
+                .end => if (sp == text.len) clist.push(.{ .pc = pc + 1 }), // TODO (the other version does not work yet either)
                 .char => if (sp < text.len and text[sp] == decode(code, pc + 1)) nlist.push(.{ .pc = pc + 2 }),
                 .any => if (sp < text.len) nlist.push(.{ .pc = pc + 1 }),
                 .jmp => clist.push(.{ .pc = decodeJmp(code, pc + 1) }),
@@ -221,18 +296,37 @@ fn pikevm(code: []const Op, text: []const u8, threads: []Thread) bool {
     return false;
 }
 
+const testing = @import("testing.zig");
+
+fn expectTokens(regex: []const u8, tokens: []const std.meta.Tag(Token)) !void {
+    var tokenizer = Tokenizer{ .input = regex };
+
+    for (tokens) |tag| {
+        const tok: @TypeOf(tag) = tokenizer.next() orelse return error.Eof;
+        try testing.expectEqual(tok, tag);
+    }
+
+    try testing.expectEqual(tokenizer.pos, regex.len);
+}
+
+test Tokenizer {
+    try expectTokens("", &.{});
+    try expectTokens("a.c+", &.{ .char, .dot, .char, .plus });
+    try expectTokens("a?(b|c)*", &.{ .char, .que, .lparen, .char, .pipe, .char, .rparen, .star });
+}
+
 fn expectCompile(regex: []const u8, expected: []const u8) !void {
     var buf = std.ArrayList(u8).init(std.testing.allocator);
     var w = buf.writer();
     defer buf.deinit();
 
-    var r = try Regex.compile(std.testing.allocator, regex);
-    defer r.deinit(std.testing.allocator);
+    var re = try Regex.compile(std.testing.allocator, regex);
+    defer re.deinit(std.testing.allocator);
 
     var pc: usize = 0;
 
-    while (pc < r.code.len) {
-        const op = r.code[pc];
+    while (pc < re.code.len) {
+        const op = re.code[pc];
 
         if (pc > 0) {
             try w.writeByte('\n');
@@ -242,14 +336,14 @@ fn expectCompile(regex: []const u8, expected: []const u8) !void {
 
         switch (op) {
             .char => try w.print(" {c}", .{
-                @as(u8, @intCast(decode(r.code, pc + 1))),
+                @as(u8, @intCast(decode(re.code, pc + 1))),
             }),
             .jmp => try w.print(" :{d}", .{
-                decodeJmp(r.code, pc + 1),
+                decodeJmp(re.code, pc + 1),
             }),
             .split => try w.print(" :{d} :{d}", .{
-                decodeJmp(r.code, pc + 1),
-                decodeJmp(r.code, pc + 2),
+                decodeJmp(re.code, pc + 1),
+                decodeJmp(re.code, pc + 2),
             }),
             else => {},
         }
@@ -265,6 +359,13 @@ fn expectCompile(regex: []const u8, expected: []const u8) !void {
 }
 
 test "Regex.compile()" {
+    try testing.expectError(Regex.compile(undefined, "?"), error.NothingToRepeat);
+    try testing.expectError(Regex.compile(undefined, "+"), error.NothingToRepeat);
+    try testing.expectError(Regex.compile(undefined, "*"), error.NothingToRepeat);
+    try testing.expectError(Regex.compile(undefined, "()"), error.EmptyGroup);
+    try testing.expectError(Regex.compile(undefined, ")"), error.NothingToClose);
+    try testing.expectError(Regex.compile(undefined, "("), error.UnclosedGroup);
+
     try expectCompile("", "  0: match");
 
     try expectCompile("abc",
@@ -317,6 +418,15 @@ test "Regex.compile()" {
         \\  5: jmp :9
         \\  7: char b
         \\  9: match
+    );
+
+    try expectCompile("ab|c",
+        \\  0: char a
+        \\  2: split :5 :9
+        \\  5: char b
+        \\  7: jmp :11
+        \\  9: char c
+        \\ 11: match
     );
 
     try expectCompile("a|b|c",
@@ -380,74 +490,126 @@ test "Regex.compile()" {
         \\ 19: char d
         \\ 21: match
     );
+
+    try expectCompile("a(b|c)+",
+        \\  0: char a
+        \\  2: split :5 :9
+        \\  5: char b
+        \\  7: jmp :11
+        \\  9: char c
+        \\ 11: split :2 :14
+        \\ 14: match
+    );
 }
 
 fn expectMatch(regex: []const u8, text: []const u8, expected: bool) !void {
-    std.debug.print("--- {s} --- {s}\n", .{ regex, text });
+    try expectMatches(regex, &.{.{ text, expected }});
+}
 
-    var r = try Regex.compile(std.testing.allocator, regex);
-    defer r.deinit(std.testing.allocator);
+fn expectMatches(regex: []const u8, fixtures: []const struct { []const u8, bool }) !void {
+    var re = try Regex.compile(std.testing.allocator, regex);
+    defer re.deinit(std.testing.allocator);
 
-    try std.testing.expectEqual(expected, r.match(text));
+    for (fixtures) |fix| {
+        errdefer std.debug.print("--- {s} --- {s}\n", .{ regex, fix[0] });
+
+        try std.testing.expectEqual(fix[1], re.match(fix[0]));
+    }
 }
 
 test "Regex.match()" {
     // Literal
-    try expectMatch("hello", "hello", true);
-    try expectMatch("hello", "hello world", true);
-    try expectMatch("hello", "hi", false);
+    try expectMatches("hello", &.{
+        .{ "hello", true },
+        .{ "hello world", true },
+        .{ "hi", false },
+    });
 
     // Dot
-    try expectMatch("h.llo", "hello", true);
-    try expectMatch("h.llo", "hallo", true);
-    try expectMatch("h.llo", "hllo", false);
+    try expectMatches("h.llo", &.{
+        .{ "hello", true },
+        .{ "hallo", true },
+        .{ "hllo", false },
+    });
 
     // Question
-    try expectMatch("ab?c", "ac", true);
-    try expectMatch("ab?c", "abc", true);
-    try expectMatch("ab?c", "abbc", false);
-    try expectMatch("ab?c", "adc", false);
+    try expectMatches("ab?c", &.{
+        .{ "ac", true },
+        .{ "abc", true },
+        .{ "abbc", false },
+        .{ "adc", false },
+    });
 
     // Plus
-    try expectMatch("ab+c", "abc", true);
-    try expectMatch("ab+c", "abbc", true);
-    try expectMatch("ab+c", "ac", false);
+    try expectMatches("ab+c", &.{
+        .{ "abc", true },
+        .{ "abbc", true },
+        .{ "ac", false },
+    });
 
     // Star
-    try expectMatch("ab*c", "ac", true);
-    try expectMatch("ab*c", "abc", true);
-    try expectMatch("ab*c", "abbc", true);
-    try expectMatch("ab*c", "adc", false);
+    try expectMatches("ab*c", &.{
+        .{ "ac", true },
+        .{ "abc", true },
+        .{ "abbc", true },
+        .{ "adc", false },
+    });
 
     // Pipe
-    try expectMatch("a|b|c", "a", true);
-    try expectMatch("a|b|c", "b", true);
-    try expectMatch("a|b|c", "c", true);
-    try expectMatch("a|b|c", "d", false);
-    try expectMatch("ab|c", "ab", true);
-    try expectMatch("ab|c", "c", true);
-    try expectMatch("ab|c", "d", false);
+    try expectMatches("a|b|c", &.{
+        .{ "a", true },
+        .{ "b", true },
+        .{ "c", true },
+        .{ "d", false },
+    });
+
+    try expectMatches("ab|c", &.{
+        .{ "ab", true },
+        .{ "ac", true },
+        .{ "c", false },
+        .{ "d", false },
+    });
 
     // Group
-    try expectMatch("(abc)?def", "abcdef", true);
-    try expectMatch("(abc)?def", "def", true);
-    try expectMatch("(abc)?def", "adef", false);
-    try expectMatch("(ab)+de", "abde", true);
-    try expectMatch("(ab)+de", "ababde", true);
-    try expectMatch("(ab)+de", "abd", false);
-    try expectMatch("(ab)*de", "abde", true);
-    try expectMatch("(ab)*de", "ababde", true);
-    try expectMatch("(ab)*de", "de", true);
-    try expectMatch("(ab)*de", "abd", false);
-    try expectMatch("(a|b)*", "aba", true);
-    try expectMatch("(a|b)*c", "abbaabc", true);
-    try expectMatch("(a|b)*c", "d", false);
+    try expectMatches("(abc)?def", &.{
+        .{ "abcdef", true },
+        .{ "def", true },
+        .{ "adef", false },
+    });
+
+    try expectMatches("(ab)+de", &.{
+        .{ "abde", true },
+        .{ "ababde", true },
+        .{ "abd", false },
+    });
+
+    try expectMatches("(ab)*de", &.{
+        .{ "abde", true },
+        .{ "ababde", true },
+        .{ "de", true },
+        .{ "abd", false },
+    });
+
+    try expectMatches("(a|b)*", &.{
+        .{ "aba", true },
+    });
+
+    try expectMatches("(a|b)*c", &.{
+        .{ "abbaabc", true },
+        .{ "d", false },
+    });
 
     // Start/End
-    try expectMatch("^hello", "hello world", true);
-    try expectMatch("^hello", "say hello", false);
-    // try expectMatch("world$", "hello world", true);
-    // try expectMatch("world$", "world peace", false);
+    try expectMatches("^hello", &.{
+        .{ "hello world", true },
+        .{ "say hello", false },
+    });
+
+    try expectMatches("world$", &.{
+        .{ "world", true },
+        // .{ "hello world", true },
+        // .{ "world peace", false },
+    });
 
     // Empty
     try expectMatch("hello", "", false);
@@ -456,7 +618,9 @@ test "Regex.match()" {
     try expectMatch("", "any", true);
 
     // Combination
-    // try expectMatch("^a.*b$", "ab", true);
-    // try expectMatch("^a.*b$", "axxxb", true);
-    // try expectMatch("^a.*b$", "axxx", false);
+    // try expectMatches("^a.*b$", &.{
+    //     .{ "ab", true },
+    //     .{ "axxxb", true },
+    //     .{ "axxx", false },
+    // });
 }
