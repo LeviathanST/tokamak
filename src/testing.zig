@@ -4,9 +4,7 @@ const mem = @import("mem.zig");
 const http = @import("http.zig");
 
 // re-export (without name clashing)
-pub usingnamespace struct {
-    pub const allocator = std.testing.allocator;
-};
+pub const allocator = std.testing.allocator;
 
 pub const time = struct {
     pub var value: i64 = 0;
@@ -234,24 +232,24 @@ pub const MockClient = struct {
     interface: http.Client,
     fixtures: std.ArrayList(struct { std.http.Method, []const u8, std.http.Status, []const u8 }),
 
-    pub fn init(allocator: std.mem.Allocator) !*MockClient {
-        const self = try allocator.create(MockClient);
+    pub fn init(alloc: std.mem.Allocator) !*MockClient {
+        const self = try alloc.create(MockClient);
 
         self.* = .{
             .interface = .{
                 .make_request = &make_request,
                 .config = &.{},
             },
-            .fixtures = std.ArrayList(struct { std.http.Method, []const u8, std.http.Status, []const u8 }).init(allocator),
+            .fixtures = std.ArrayList(struct { std.http.Method, []const u8, std.http.Status, []const u8 }).init(alloc),
         };
 
         return self;
     }
 
     pub fn deinit(self: *MockClient) void {
-        const allocator = self.fixtures.allocator;
+        const alloc = self.fixtures.allocator;
         self.fixtures.deinit();
-        allocator.destroy(self);
+        alloc.destroy(self);
     }
 
     fn make_request(client: *http.Client, arena: std.mem.Allocator, options: http.RequestOptions) !http.ClientResponse {
