@@ -4,8 +4,12 @@
     .version = "2.0.0",
     .dependencies = .{
         .httpz = .{
-            .url = "git+https://github.com/karlseguin/http.zig?ref=master#726f3da897e09971856e554e3bfa384bced56ffb",
-            .hash = "httpz-0.0.0-PNVzrE24BgAnqwdqRlPgh_ytZRtCghp75hfQPqgr6G7N",
+            .url = "git+https://github.com/karlseguin/http.zig?ref=dev#8b4e4322599ef47516ca4a8e149836a8ce888149",
+            .hash = "httpz-0.0.0-PNVzrNXABgDNp_qe1xjmpAQuvFBF-7J03b1v-cPqUOXh",
+        },
+        .pg = .{
+            .url = "git+https://github.com/karlseguin/pg.zig?ref=dev#cf4d3cc27d428ea18bd248e7a620743612c64272",
+            .hash = "pg-0.0.0-Wp_7gQoABgDcpd6oQClZax0w5gMYrKB7aYpKg-2KD4sY",
         },
     },
     .paths = .{
