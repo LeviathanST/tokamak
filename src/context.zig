@@ -143,8 +143,10 @@ pub const Context = struct {
                 self.params = params;
 
                 if (route.handler) |handler| {
+                    std.log.debug("detect route handler", .{});
                     try handler(self);
                 } else {
+                    std.log.debug("next route", .{});
                     try self.next();
                 }
             }
