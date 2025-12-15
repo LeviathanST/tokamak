@@ -71,6 +71,7 @@ pub fn json(comptime options: SchemaOptions) Route {
                 .openapi = "3.0.0",
                 .info = options.info,
                 .components = options.components,
+                .security = options.security,
                 .paths = paths,
             });
         }
