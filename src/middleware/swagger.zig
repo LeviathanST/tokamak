@@ -52,11 +52,12 @@ const SchemaOptions = struct {
         securitySchemes: struct {
             bearerAuth: struct {
                 type: []const u8 = "http",
-                scheme: []const u8 = "bearer",
+                scheme: []const u8 = "scheme",
                 bearerFormat: []const u8 = "JWT",
             } = .{},
         } = .{},
     } = .{},
+    security: []const SecurityRequirement = &[_]SecurityRequirement{.{}},
     routes: ?[]const Route = null,
 };
 
@@ -173,3 +174,4 @@ const Parameter = struct { name: []const u8, in: []const u8, required: bool, sch
 const RequestBody = struct { content: std.json.ArrayHashMap(Content) };
 const Response = struct { description: ?[]const u8, content: ?std.json.ArrayHashMap(Content) };
 const Content = struct { schema: Schema };
+const SecurityRequirement = struct { bearerAuth: []const []const u8 = &[_][]const u8{} };
