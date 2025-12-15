@@ -48,6 +48,15 @@ const SchemaOptions = struct {
         title: []const u8,
         version: []const u8 = "1.0.0",
     },
+    components: struct {
+        securitySchemes: struct {
+            bearerAuth: struct {
+                type: []const u8 = "http",
+                scheme: []const u8 = "scheme",
+                bearerFormat: []const u8 = "JWT",
+            } = .{},
+        } = .{},
+    } = .{},
     routes: ?[]const Route = null,
 };
 
@@ -60,6 +69,7 @@ pub fn json(comptime options: SchemaOptions) Route {
             try ctx.send(.{
                 .openapi = "3.0.0",
                 .info = options.info,
+                .components = options.components,
                 .paths = paths,
             });
         }
