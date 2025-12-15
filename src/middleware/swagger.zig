@@ -52,7 +52,7 @@ const SchemaOptions = struct {
         securitySchemes: struct {
             bearerAuth: struct {
                 type: []const u8 = "http",
-                scheme: []const u8 = "scheme",
+                scheme: []const u8 = "bearer",
                 bearerFormat: []const u8 = "JWT",
             } = .{},
         } = .{},
