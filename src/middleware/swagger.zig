@@ -95,9 +95,9 @@ fn walk(arena: std.mem.Allocator, prefix: []const u8, res: *PathMap, routes: []c
                 const path = (try res.map.getOrPutValue(arena, key, .{})).value_ptr;
 
                 var op: Operation = .{};
+                var params: std.ArrayList(Parameter) = .empty;
 
                 if (m.params.len > 0) {
-                    var params = std.ArrayList(Parameter){};
                     const names = Params.match(route.path.?, route.path.?).?;
 
                     for (m.params, 0..) |schema, i| try params.append(arena, .{
@@ -106,9 +106,23 @@ fn walk(arena: std.mem.Allocator, prefix: []const u8, res: *PathMap, routes: []c
                         .required = true,
                         .schema = schema,
                     });
-
-                    op.parameters = params.items;
                 }
+
+                if (m.query) |query| {
+                    switch (query) {
+                        .object => |props| {
+                            for (props) |p| try params.append(arena, .{
+                                .name = p.name,
+                                .in = "query",
+                                .required = false,
+                                .schema = p.schema.*,
+                            });
+                        },
+                        else => return error.QueryTypeNotSupported,
+                    }
+                }
+
+                op.parameters = params.items;
 
                 if (m.body) |schema| {
                     op.requestBody = .{
@@ -170,7 +184,11 @@ fn swaggerPath(arena: std.mem.Allocator, prefix: []const u8, path: []const u8) !
 
 const PathMap = std.json.ArrayHashMap(Path);
 const Path = std.json.ArrayHashMap(Operation);
-const Operation = struct { parameters: []const Parameter = &.{}, requestBody: ?RequestBody = null, responses: std.json.ArrayHashMap(Response) = .{} };
+const Operation = struct {
+    parameters: []const Parameter = &.{},
+    requestBody: ?RequestBody = null,
+    responses: std.json.ArrayHashMap(Response) = .{},
+};
 const Parameter = struct { name: []const u8, in: []const u8, required: bool, schema: Schema };
 const RequestBody = struct { content: std.json.ArrayHashMap(Content) };
 const Response = struct { description: ?[]const u8, content: ?std.json.ArrayHashMap(Content) };
